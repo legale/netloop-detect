@@ -1,0 +1,5 @@
+./netloop-detector
+*.o
+*.a
+.vscode/**
+tcpdump.pid
