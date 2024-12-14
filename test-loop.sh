@@ -6,7 +6,7 @@ if [ "$(id -u)" -ne 0 ]; then
 fi
 
 # Names for the bridge and veth pairs
-BRIDGE_NAME="test-br"
+BRIDGE_NAME="br-test-veth"
 VETH1="veth101"
 VETH2="veth111"
 

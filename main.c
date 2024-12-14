@@ -97,9 +97,10 @@ int send_frame(int sock, const char *iface, unsigned char *src_mac,
   device.sll_halen = ETH_ALEN;
 
   unsigned char frame[FRAME_SIZE] = {0};
-  memcpy(frame, dst_mac, 6);     // Destination MAC
-  memcpy(frame + 6, src_mac, 6); // Source MAC
   struct ether_header *frame_hdr = (struct ether_header *)frame;
+
+  memcpy(frame_hdr->ether_dhost, dst_mac, 6); // Destination MAC
+  memcpy(frame_hdr->ether_shost, src_mac, 6); // Source MAC
   frame_hdr->ether_type = htons(ETHER_TYPE_CUSTOM);
   memcpy(frame + PAYLOAD_OFFSET, fingerprint, FINGERPRINT_SIZE); // Payload
 
@@ -175,7 +176,8 @@ void *thread_func(void *arg) {
              (unsigned char[]){0xff, 0xff, 0xff, 0xff, 0xff, 0xff},
              args->fingerprint);
 
-  int ret = recv_frame(sock, args->src_mac, args->fingerprint, args->timeout_sec);
+  int ret =
+      recv_frame(sock, args->src_mac, args->fingerprint, args->timeout_sec);
 
   close(sock);
   pthread_exit((void *)(intptr_t)ret);
@@ -252,7 +254,7 @@ int get_ifaces(iface_t *interfaces, int *count) {
 
       if (strlen(iface_data.name) == 0 || strcmp(iface_data.name, "lo") == 0)
         continue;
-      
+
       memcpy(&interfaces[(*count)++], &iface_data, sizeof(iface_data));
     }
   }
@@ -272,8 +274,6 @@ int main(int argc, char *argv[]) {
     fprintf(stderr, "Invalid timeout value.\n");
     return EXIT_FAILURE;
   }
-
-
 
   if (strcmp(argv[1], "any") == 0) {
     if (get_ifaces(interfaces, &iface_count) != 0) {
