@@ -2,6 +2,10 @@
 #define LINUX
 #endif
 
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE 1
+#endif
+
 #ifndef __USE_MISC
 #define __USE_MISC
 #endif
@@ -27,7 +31,7 @@
 
 #define FRAME_SIZE 64
 #define PAYLOAD_OFFSET 14
-#define FINGERPRINT_SIZE 32
+#define FINGERPRINT_SIZE 8
 
 #define ETHER_TYPE_CUSTOM ETH_P_LOOPBACK
 
@@ -44,7 +48,7 @@ typedef struct {
 typedef struct {
   char iface[IFNAMSIZ + 1];
   unsigned char src_mac[6];
-  unsigned char fingerprint[FINGERPRINT_SIZE + 1];
+  unsigned char fp[FINGERPRINT_SIZE + 1];
   int timeout_sec;
 } thread_args_t;
 
@@ -53,13 +57,13 @@ thread_args_t thread_args[64];
 iface_t interfaces[64];
 int iface_count = 0;
 
-void gen_fingerprint(unsigned char *fingerprint, size_t size) {
+void gen_fp(unsigned char *fp, size_t size) {
   if (size == 0)
     return;
   for (size_t i = 0; i < size - 1; i++) {
-    fingerprint[i] = rand() % 256;
+    fp[i] = rand() % 256;
   }
-  fingerprint[size - 1] = '\0';
+  fp[size - 1] = '\0';
 }
 
 int get_mac(const char *iface, unsigned char *mac) {
@@ -83,7 +87,7 @@ int get_mac(const char *iface, unsigned char *mac) {
 }
 
 int send_frame(int sock, const char *iface, unsigned char *src_mac,
-               unsigned char *dst_mac, unsigned char *fingerprint) {
+               unsigned char *dst_mac, unsigned char *fp) {
   struct sockaddr_ll device = {0};
   device.sll_ifindex = if_nametoindex(iface);
   if (device.sll_ifindex == 0) {
@@ -102,7 +106,7 @@ int send_frame(int sock, const char *iface, unsigned char *src_mac,
   memcpy(frame_hdr->ether_dhost, dst_mac, 6); // Destination MAC
   memcpy(frame_hdr->ether_shost, src_mac, 6); // Source MAC
   frame_hdr->ether_type = htons(ETHER_TYPE_CUSTOM);
-  memcpy(frame + PAYLOAD_OFFSET, fingerprint, FINGERPRINT_SIZE); // Payload
+  memcpy(frame + PAYLOAD_OFFSET, fp, FINGERPRINT_SIZE); // Payload
 
   if (sendto(sock, frame, FRAME_SIZE, 0, (struct sockaddr *)&device,
              sizeof(device)) < 0) {
@@ -110,55 +114,69 @@ int send_frame(int sock, const char *iface, unsigned char *src_mac,
     return -1;
   }
 
-  printf("iface: %s: test frame sent with fingerprint: ", iface);
-  for (int i = 0; i < FINGERPRINT_SIZE; i++) {
-    printf("%02x", fingerprint[i]);
+  printf("iface: %-*s: test frame sent with   fingerprint: ", IFNAMSIZ, iface);
+  for (int i = 0; i < FINGERPRINT_SIZE - 1; i++) {
+    printf("%02x", fp[i]);
   }
   printf("\n");
   return 0;
 }
 
-int recv_frame(int sock, unsigned char *src_mac, unsigned char *fingerprint,
-               int timeout_sec) {
+int recv_frame(int sock, uint8_t *src_mac, uint8_t *fp, int timeout_sec) {
   unsigned char buffer[FRAME_SIZE];
   struct sockaddr_ll device = {0};
   socklen_t len = sizeof(device);
 
-  fd_set read_fds;
-  struct timeval timeout;
+  struct timespec time_start_mono;
+  struct timespec time_now_mono;
+  clock_gettime(CLOCK_MONOTONIC, &time_start_mono);
+  memcpy(&time_now_mono, &time_start_mono, sizeof(struct timespec));
 
-  FD_ZERO(&read_fds);
-  FD_SET(sock, &read_fds);
-  timeout.tv_sec = timeout_sec;
-  timeout.tv_usec = 0;
+  while (time_now_mono.tv_sec - time_start_mono.tv_sec < timeout_sec) {
+    fd_set read_fds;
+    struct timeval timeout;
 
-  int result = select(sock + 1, &read_fds, NULL, NULL, &timeout);
-  if (result <= 0) {
-    if (result == 0)
-      printf("Timeout reached. No loop detected.\n");
-    else
-      perror("select");
-    return 0;
-  }
+    FD_ZERO(&read_fds);
+    FD_SET(sock, &read_fds);
+    timeout.tv_sec = timeout_sec;
+    timeout.tv_usec = 0;
 
-  ssize_t num_bytes =
-      recvfrom(sock, buffer, FRAME_SIZE, 0, (struct sockaddr *)&device, &len);
-  if (num_bytes < 0) {
-    perror("recvfrom");
-    return -1;
-  }
-
-  if (memcmp(buffer + 6, src_mac, 6) == 0 &&
-      ntohs(*(unsigned short *)(buffer + 12)) == ETHER_TYPE_CUSTOM &&
-      memcmp(buffer + PAYLOAD_OFFSET, fingerprint, FINGERPRINT_SIZE) == 0) {
-    char iface[IFNAMSIZ + 1] = {0};
-    if (if_indextoname(device.sll_ifindex, iface) == NULL) {
-      perror("if_indextoname");
-      return -1;
+    int result = select(sock + 1, &read_fds, NULL, NULL, &timeout);
+    if (result <= 0) {
+      if (result == 0)
+        printf("Timeout reached. No loop detected.\n");
+      else
+        perror("select");
+      return 0;
     }
 
-    printf("iface: %s: LOOP DETECTED!!! fingerprint matched.\n", iface);
-    return 1;
+    ssize_t recv =
+        recvfrom(sock, buffer, FRAME_SIZE, 0, (struct sockaddr *)&device, &len);
+    if (recv < 0) {
+      perror("recvfrom");
+      return -1;
+    }
+    struct ether_header *ethh = (struct ether_header *)buffer;
+    uint8_t *fp_eth = buffer + PAYLOAD_OFFSET;
+
+    if (memcmp(ethh->ether_shost, src_mac, 6) == 0 &&
+        ethh->ether_type == htons(ETHER_TYPE_CUSTOM) &&
+        memcmp(fp_eth, fp, FINGERPRINT_SIZE) == 0) {
+      char iface[IFNAMSIZ + 1] = {0};
+      if (if_indextoname(device.sll_ifindex, iface) == NULL) {
+        perror("if_indextoname");
+        return -1;
+      }
+
+      printf("iface: %-*s: LOOP DETECTED!!! match fingerprint: ", IFNAMSIZ, iface);
+      for (int i = 0; i < FINGERPRINT_SIZE - 1; i++) {
+        printf("%02x", fp[i]);
+      }
+      printf("\n");
+      return 1;
+    }
+
+    clock_gettime(CLOCK_MONOTONIC, &time_now_mono);
   }
   return 0;
 }
@@ -173,11 +191,9 @@ void *thread_func(void *arg) {
   }
 
   send_frame(sock, args->iface, args->src_mac,
-             (unsigned char[]){0xff, 0xff, 0xff, 0xff, 0xff, 0xff},
-             args->fingerprint);
+             (unsigned char[]){0xff, 0xff, 0xff, 0xff, 0xff, 0xff}, args->fp);
 
-  int ret =
-      recv_frame(sock, args->src_mac, args->fingerprint, args->timeout_sec);
+  int ret = recv_frame(sock, args->src_mac, args->fp, args->timeout_sec);
 
   close(sock);
   pthread_exit((void *)(intptr_t)ret);
@@ -295,13 +311,10 @@ int main(int argc, char *argv[]) {
   }
 
   for (int i = 0; i < iface_count; i++) {
-    unsigned char fingerprint[FINGERPRINT_SIZE + 1];
-    gen_fingerprint(fingerprint, FINGERPRINT_SIZE);
-
     thread_args[i].timeout_sec = timeout_sec;
+    gen_fp(thread_args[i].fp, FINGERPRINT_SIZE);
     strncpy(thread_args[i].iface, interfaces[i].name, IFNAMSIZ);
     memcpy(thread_args[i].src_mac, interfaces[i].mac, 6);
-    memcpy(thread_args[i].fingerprint, fingerprint, FINGERPRINT_SIZE);
 
     if (pthread_create(&threads[i], NULL, thread_func, &thread_args[i]) != 0) {
       perror("pthread_create");

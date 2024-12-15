@@ -1,4 +1,4 @@
-./netloop-detector
+netloop-detector
 *.o
 *.a
 .vscode/**
